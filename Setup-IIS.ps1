@@ -18,6 +18,16 @@
     Untuk Mode Update/SyncBindings. Menampilkan diff perubahan
     tanpa apply perubahan ke IIS.
 
+.PARAMETER AuditExport
+    Khusus Mode Audit. Export hasil audit ke file:
+    none | markdown | csv | both
+
+.PARAMETER AuditMarkdownPath
+    Path output markdown untuk Mode Audit jika AuditExport=markdown/both.
+
+.PARAMETER AuditCsvPath
+    Path output CSV untuk Mode Audit jika AuditExport=csv/both.
+
 .EXAMPLE
     .\Setup-IIS.ps1
     .\Setup-IIS.ps1 -Mode Status
@@ -26,6 +36,9 @@
     .\Setup-IIS.ps1 -Mode SyncBindings
     .\Setup-IIS.ps1 -Mode SyncBindings -DryRun
     .\Setup-IIS.ps1 -Mode Audit
+    .\Setup-IIS.ps1 -Mode Audit -AuditExport both
+    .\Setup-IIS.ps1 -Mode Audit -AuditExport markdown -AuditMarkdownPath ".\artifacts\audit-port.md"
+    .\Setup-IIS.ps1 -Mode Audit -AuditExport csv -AuditCsvPath ".\artifacts\audit-port.csv"
     .\Setup-IIS.ps1 -ConfigPath "C:\configs\production.json" -Mode Setup
 #>
 
@@ -33,7 +46,11 @@ param(
     [string]$ConfigPath = ".\server-config.json",
     [ValidateSet("Setup", "Update", "SyncBindings", "Remove", "Status", "Audit")]
     [string]$Mode = "Setup",
-    [switch]$DryRun
+    [switch]$DryRun,
+    [ValidateSet("none", "markdown", "csv", "both")]
+    [string]$AuditExport = "none",
+    [string]$AuditMarkdownPath = ".\audit-port-report.md",
+    [string]$AuditCsvPath = ".\audit-port-report.csv"
 )
 
 # ─────────────────────────────────────────────
@@ -162,22 +179,25 @@ function Show-PortAudit {
     Write-Host ""
     Write-Host "  IIS SITE BINDINGS:" -ForegroundColor White
     Write-Host "  ─────────────────────────────────────" -ForegroundColor Gray
+    $iisBindingRows = @()
     try {
-        Get-WebBinding | Select-Object @{n="Port";e={
-            if ($_.bindingInformation -match ":(\d+):") { $Matches[1] } else { "-" }
+        $iisBindingRows = @(Get-WebBinding | Select-Object @{n="Port";e={
+            if ($_.bindingInformation -match ":(\d+):") { [int]$Matches[1] } else { 0 }
         }}, @{n="Host";e={
             $parts = $_.bindingInformation -split ":"
             if ($parts[2]) { $parts[2] } else { "*" }
-        }}, protocol, @{n="Site";e={
+        }}, @{n="Protocol";e={$_.protocol}}, @{n="Site";e={
             ($_.ItemXPath -split "'")[1]
-        }} | Sort-Object Port | Format-Table -AutoSize
+        }} | Sort-Object Port)
+
+        $iisBindingRows | Select-Object @{n="Port";e={ if ($_.Port -gt 0) { $_.Port } else { "-" } }}, Host, Protocol, Site | Format-Table -AutoSize
     } catch {
         Write-Warn "Tidak bisa ambil IIS binding (import WebAdministration terlebih dahulu)"
     }
 
     # Tampilkan rekomendasi port aman
     Write-Host ""
-    Write-Host "  REKOMENDASI PORT UNTUK PROJECT BARU:" -ForegroundColor White
+    Write-Host "  REKOMENDASI PORT UNTUK PROJECT BARU (LANGSUNG PAKAI ANGKA):" -ForegroundColor White
     Write-Host "  ─────────────────────────────────────" -ForegroundColor Gray
 
     $usedPorts  = Get-UsedPorts
@@ -185,28 +205,153 @@ function Show-PortAudit {
     $allUsed    = ($usedPorts + $iisPorts) | Sort-Object -Unique
 
     $ranges = @(
-        @{Start=6000; End=6099; Label="Range 1 (Project Pertama)"},
-        @{Start=6100; End=6199; Label="Range 2 (Project Kedua)"},
-        @{Start=6200; End=6299; Label="Range 3 (Project Ketiga)"},
-        @{Start=6300; End=6399; Label="Range 4 (Project Keempat)"}
+        @{Start=6000; End=6099; Label="Project 1"; Hint="Contoh: API=6000, Internal=6001, External=6002"},
+        @{Start=6100; End=6199; Label="Project 2"; Hint="Contoh: API=6100, Internal=6101, External=6102"},
+        @{Start=6200; End=6299; Label="Project 3"; Hint="Contoh: API=6200, Internal=6201, External=6202"},
+        @{Start=6300; End=6399; Label="Project 4"; Hint="Contoh: API=6300, Internal=6301, External=6302"}
     )
+
+    $rangeSummary = @()
 
     foreach ($range in $ranges) {
         $available = @()
+        $usedInRange = @()
         for ($p = $range.Start; $p -le $range.End; $p++) {
-            if ($p -notin $allUsed) { $available += $p }
+            if ($p -notin $allUsed) {
+                $available += $p
+            } else {
+                $usedInRange += $p
+            }
         }
         $status = if ($available.Count -gt 90) { "AMAN" } elseif ($available.Count -gt 0) { "SEBAGIAN" } else { "PENUH" }
         $color  = if ($status -eq "AMAN") { "Green" } elseif ($status -eq "SEBAGIAN") { "Yellow" } else { "Red" }
 
-        Write-Host "    $($range.Label): " -NoNewline
+        Write-Host "    $($range.Label) ($($range.Start)-$($range.End)): " -NoNewline
         Write-Host "$status ($($available.Count) port tersedia)" -ForegroundColor $color
 
-        if ($available.Count -gt 0 -and $available.Count -le 90) {
-            Write-Host "    Port tersedia: $($available[0..9] -join ', ')..." -ForegroundColor Gray
+        Write-Host "    Panduan : $($range.Hint)" -ForegroundColor Gray
+
+        if ($available.Count -gt 0) {
+            $availableText = if ($available.Count -le 30) {
+                $available -join ', '
+            } else {
+                "$($available[0..10] -join ', '), ... , $($available[($available.Count-5)..($available.Count-1)] -join ', ')"
+            }
+            Write-Host "    Tersedia: $availableText" -ForegroundColor Green
+        } else {
+            Write-Host "    Tersedia: -" -ForegroundColor DarkGray
+        }
+
+        if ($usedInRange.Count -gt 0) {
+            $usedText = if ($usedInRange.Count -le 20) {
+                $usedInRange -join ', '
+            } else {
+                "$($usedInRange[0..14] -join ', '), ..."
+            }
+            Write-Host "    Terpakai: $usedText" -ForegroundColor Yellow
+        } else {
+            Write-Host "    Terpakai: -" -ForegroundColor DarkGray
+        }
+
+        Write-Host ""
+
+        $rangeSummary += [PSCustomObject]@{
+            Label          = $range.Label
+            RangeStart     = [int]$range.Start
+            RangeEnd       = [int]$range.End
+            Status         = $status
+            AvailableCount = [int]$available.Count
+            UsedCount      = [int]$usedInRange.Count
+            Hint           = [string]$range.Hint
+            AvailablePorts = ($available -join ';')
+            UsedPorts      = ($usedInRange -join ';')
         }
     }
     Write-Host ""
+
+    return [PSCustomObject]@{
+        GeneratedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        ServerName  = $config.serverName
+        Mode        = "Audit"
+        RangeSummary = $rangeSummary
+        IISBindings = $iisBindingRows
+    }
+}
+
+function Export-PortAuditMarkdown {
+    param(
+        [object]$AuditData,
+        [string]$OutputPath
+    )
+
+    $parent = Split-Path -Parent $OutputPath
+    if ($parent -and -not (Test-Path $parent)) {
+        New-Item -Path $parent -ItemType Directory -Force | Out-Null
+    }
+
+    $lines = @()
+    $lines += "# Audit Port Report"
+    $lines += ""
+    $lines += "- GeneratedAt: $($AuditData.GeneratedAt)"
+    $lines += "- ServerName: $($AuditData.ServerName)"
+    $lines += ""
+    $lines += "## Range Summary"
+    $lines += ""
+    $lines += "| Label | Range | Status | AvailableCount | UsedCount | Hint |"
+    $lines += "| --- | --- | --- | ---: | ---: | --- |"
+
+    foreach ($r in @($AuditData.RangeSummary)) {
+        $rangeText = "$($r.RangeStart)-$($r.RangeEnd)"
+        $lines += "| $($r.Label) | $rangeText | $($r.Status) | $($r.AvailableCount) | $($r.UsedCount) | $($r.Hint) |"
+    }
+
+    $lines += ""
+    $lines += "## Available Ports (Per Range)"
+    $lines += ""
+    foreach ($r in @($AuditData.RangeSummary)) {
+        $rangeText = "$($r.RangeStart)-$($r.RangeEnd)"
+        $ports = if ([string]::IsNullOrWhiteSpace($r.AvailablePorts)) { "-" } else { $r.AvailablePorts }
+        $lines += "- $($r.Label) ($rangeText): $ports"
+    }
+
+    $lines += ""
+    $lines += "## Used Ports (Per Range)"
+    $lines += ""
+    foreach ($r in @($AuditData.RangeSummary)) {
+        $rangeText = "$($r.RangeStart)-$($r.RangeEnd)"
+        $ports = if ([string]::IsNullOrWhiteSpace($r.UsedPorts)) { "-" } else { $r.UsedPorts }
+        $lines += "- $($r.Label) ($rangeText): $ports"
+    }
+
+    $lines += ""
+    $lines += "## IIS Bindings"
+    $lines += ""
+    $lines += "| Site | Protocol | Host | Port |"
+    $lines += "| --- | --- | --- | ---: |"
+
+    foreach ($b in @($AuditData.IISBindings)) {
+        $portText = if ($b.Port -gt 0) { [string]$b.Port } else { "-" }
+        $hostText = if ([string]::IsNullOrWhiteSpace([string]$b.Host)) { "*" } else { [string]$b.Host }
+        $lines += "| $([string]$b.Site) | $([string]$b.Protocol) | $hostText | $portText |"
+    }
+
+    Set-Content -Path $OutputPath -Value ($lines -join "`r`n") -Encoding UTF8
+}
+
+function Export-PortAuditCsv {
+    param(
+        [object]$AuditData,
+        [string]$OutputPath
+    )
+
+    $parent = Split-Path -Parent $OutputPath
+    if ($parent -and -not (Test-Path $parent)) {
+        New-Item -Path $parent -ItemType Directory -Force | Out-Null
+    }
+
+    @($AuditData.RangeSummary) |
+        Select-Object Label, RangeStart, RangeEnd, Status, AvailableCount, UsedCount, Hint, AvailablePorts, UsedPorts |
+        Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
 }
 
 # ─────────────────────────────────────────────
@@ -782,6 +927,11 @@ if ($DryRun -and $Mode -notin @("Update", "SyncBindings")) {
     exit 1
 }
 
+if ($AuditExport -ne "none" -and $Mode -ne "Audit") {
+    Write-Fail "AuditExport hanya didukung untuk Mode Audit"
+    exit 1
+}
+
 if ($DryRun) {
     Write-Warn "DRY-RUN aktif: tidak ada perubahan yang akan diterapkan ke IIS"
 }
@@ -792,7 +942,18 @@ Write-Host "  Projects: $($projects.Count) aktif" -ForegroundColor White
 # ── Mode: Audit ──────────────────────────────
 if ($Mode -eq "Audit") {
     Import-Module WebAdministration -ErrorAction SilentlyContinue
-    Show-PortAudit
+    $auditData = Show-PortAudit
+
+    if ($AuditExport -in @("markdown", "both")) {
+        Export-PortAuditMarkdown -AuditData $auditData -OutputPath $AuditMarkdownPath
+        Write-Success "Audit Markdown exported: $AuditMarkdownPath"
+    }
+
+    if ($AuditExport -in @("csv", "both")) {
+        Export-PortAuditCsv -AuditData $auditData -OutputPath $AuditCsvPath
+        Write-Success "Audit CSV exported: $AuditCsvPath"
+    }
+
     exit 0
 }
 

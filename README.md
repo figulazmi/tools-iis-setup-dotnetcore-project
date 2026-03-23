@@ -10,6 +10,7 @@ Fitur terbaru:
 - Validasi `requiredEnvKeys` per project sebelum apply untuk mencegah key kritikal terlewat.
 - Dry-run untuk preview diff env vars sebelum apply (tanpa perubahan ke IIS).
 - Mode `SyncBindings` untuk sinkronisasi binding IIS (port/host/protocol) dari config.
+- Mode `Audit` sekarang bisa export hasil ke format Markdown/CSV untuk CI pipeline.
 
 ---
 
@@ -131,11 +132,25 @@ dotnet publish ./src/MyProject.API `
 | `Status` | `.\Setup-IIS.ps1 -Mode Status` | Tampilkan status semua site |
 | `Remove` | `.\Setup-IIS.ps1 -Mode Remove` | Hapus semua site (dengan konfirmasi) |
 | `Audit` | `.\Setup-IIS.ps1 -Mode Audit` | Tampilkan semua port yang dipakai + rekomendasi port aman |
+| `Audit (Export Markdown)` | `.\Setup-IIS.ps1 -Mode Audit -AuditExport markdown` | Export laporan audit ke markdown |
+| `Audit (Export CSV)` | `.\Setup-IIS.ps1 -Mode Audit -AuditExport csv` | Export laporan audit ke CSV |
+| `Audit (Export Both)` | `.\Setup-IIS.ps1 -Mode Audit -AuditExport both` | Export markdown + CSV sekaligus |
 
 Contoh preview sebelum apply:
 
 ```powershell
 .\Setup-IIS.ps1 -Mode Update -DryRun
+```
+
+Contoh export audit untuk CI/CD dan dokumentasi:
+
+```powershell
+# Export dua format sekaligus (default path)
+.\Setup-IIS.ps1 -Mode Audit -AuditExport both
+
+# Export ke folder artifacts CI
+.\Setup-IIS.ps1 -Mode Audit -AuditExport markdown -AuditMarkdownPath ".\artifacts\audit-port.md"
+.\Setup-IIS.ps1 -Mode Audit -AuditExport csv -AuditCsvPath ".\artifacts\audit-port.csv"
 ```
 
 Contoh sinkronisasi binding port setelah ubah config (mis. 600x -> 700x):
