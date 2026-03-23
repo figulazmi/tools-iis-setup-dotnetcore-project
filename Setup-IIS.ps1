@@ -13,10 +13,15 @@
     Status : Tampilkan status semua site
     Audit  : Tampilkan semua port yang sudah dipakai di server ini
 
+.PARAMETER DryRun
+    Hanya untuk Mode Update. Menampilkan diff env vars (add/change/remove)
+    tanpa apply perubahan dan tanpa recycle app pool.
+
 .EXAMPLE
     .\Setup-IIS.ps1
     .\Setup-IIS.ps1 -Mode Status
     .\Setup-IIS.ps1 -Mode Update
+    .\Setup-IIS.ps1 -Mode Update -DryRun
     .\Setup-IIS.ps1 -Mode Audit
     .\Setup-IIS.ps1 -ConfigPath "C:\configs\production.json" -Mode Setup
 #>
@@ -24,7 +29,8 @@
 param(
     [string]$ConfigPath = ".\server-config.json",
     [ValidateSet("Setup", "Update", "Remove", "Status", "Audit")]
-    [string]$Mode = "Setup"
+    [string]$Mode = "Setup",
+    [switch]$DryRun
 )
 
 # ─────────────────────────────────────────────
@@ -371,34 +377,156 @@ function Set-WebConfig {
     Write-Success "web.config dibuat (dll: $dllName, hostingModel: $hostingModel)"
 }
 
-function Set-EnvVars {
+function Test-ProjectRequiredEnvKeys {
     param([object]$Project)
+
+    $requiredKeys = @($Project.requiredEnvKeys)
+    $envVars = $Project.envVars
+
+    if ($requiredKeys.Count -eq 0) {
+        Write-Fail "Project '$($Project.name)' wajib punya requiredEnvKeys di config"
+        return $false
+    }
+
+    if (-not $envVars) {
+        Write-Fail "Project '$($Project.name)' tidak punya envVars, padahal requiredEnvKeys terdefinisi"
+        return $false
+    }
+
+    $missing = @()
+    foreach ($key in $requiredKeys) {
+        $prop = $envVars.PSObject.Properties[$key]
+        if (-not $prop) {
+            $missing += $key
+            continue
+        }
+
+        $value = [string]$prop.Value
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            $missing += $key
+        }
+    }
+
+    if ($missing.Count -gt 0) {
+        Write-Fail "Project '$($Project.name)' missing required env keys: $($missing -join ', ')"
+        return $false
+    }
+
+    Write-Success "Validasi required env keys OK: $($Project.name)"
+    return $true
+}
+
+function Set-EnvVars {
+    param(
+        [object]$Project,
+        [switch]$DryRun
+    )
     $siteName = $Project.siteName
     $envVars  = $Project.envVars
 
     if (-not $envVars) {
         Write-Warn "Tidak ada envVars di config untuk $($Project.name)"
-        return
+        return $false
     }
 
-    Write-Step "Set environment variables untuk $($Project.name)..."
+    if ($DryRun) {
+        Write-Step "DRY-RUN env vars untuk $($Project.name)..."
+    } else {
+        Write-Step "Sinkronisasi environment variables untuk $($Project.name)..."
+    }
 
     $pspath = "MACHINE/WEBROOT/APPHOST/$siteName"
     $filter = "system.webServer/aspNetCore/environmentVariables"
 
-    $envVars.PSObject.Properties | ForEach-Object {
-        $key   = $_.Name
-        $value = $_.Value
-        try {
-            Remove-WebConfigurationProperty -PSPath $pspath -Filter $filter -Name "." `
-                -AtElement @{name=$key} -ErrorAction SilentlyContinue
-            Add-WebConfigurationProperty -PSPath $pspath -Filter $filter -Name "." `
-                -Value @{name=$key; value=$value}
-            Write-Success "  ENV: $key"
-        } catch {
-            Write-Warn "  Gagal set ENV '$key': $($_.Exception.Message)"
+    $desiredMap = @{}
+    foreach ($prop in $envVars.PSObject.Properties) {
+        $desiredMap[$prop.Name] = [string]$prop.Value
+    }
+
+    $existingMap = @{}
+    $existingVars = Get-WebConfigurationProperty -PSPath $pspath -Filter $filter -Name "." -ErrorAction SilentlyContinue
+    if ($existingVars) {
+        foreach ($item in @($existingVars)) {
+            if ($item.name) {
+                $existingMap[[string]$item.name] = [string]$item.value
+            }
         }
     }
+
+    $changed = $false
+
+    # Hapus key lama yang tidak ada lagi di config
+    foreach ($existingKey in $existingMap.Keys) {
+        if (-not $desiredMap.ContainsKey($existingKey)) {
+            if ($DryRun) {
+                Write-Warn "  DRY-RUN remove: $existingKey"
+                $changed = $true
+            } else {
+                try {
+                    Remove-WebConfigurationProperty -PSPath $pspath -Filter $filter -Name "." `
+                        -AtElement @{name=$existingKey} -ErrorAction Stop
+                    Write-Success "  ENV removed: $existingKey"
+                    $changed = $true
+                } catch {
+                    Write-Warn "  Gagal hapus ENV '$existingKey': $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+
+    # Upsert key sesuai config
+    foreach ($desiredKey in $desiredMap.Keys) {
+        $newValue = $desiredMap[$desiredKey]
+        $isExisting = $existingMap.ContainsKey($desiredKey)
+        if ($isExisting -and $existingMap[$desiredKey] -ceq $newValue) {
+            Write-Step "  ENV unchanged: $desiredKey"
+            continue
+        }
+
+        if ($DryRun) {
+            if ($isExisting) {
+                Write-Warn "  DRY-RUN change: $desiredKey"
+            } else {
+                Write-Warn "  DRY-RUN add: $desiredKey"
+            }
+            $changed = $true
+            continue
+        }
+
+        try {
+            Remove-WebConfigurationProperty -PSPath $pspath -Filter $filter -Name "." `
+                -AtElement @{name=$desiredKey} -ErrorAction SilentlyContinue
+            Add-WebConfigurationProperty -PSPath $pspath -Filter $filter -Name "." `
+                -Value @{name=$desiredKey; value=$newValue}
+            Write-Success "  ENV synced: $desiredKey"
+            $changed = $true
+        } catch {
+            Write-Warn "  Gagal set ENV '$desiredKey': $($_.Exception.Message)"
+        }
+    }
+
+    return $changed
+}
+
+function Recycle-ProjectAppPool {
+    param([object]$Project)
+
+    $poolName = $Project.appPoolName
+    Write-Step "Recycle app pool: $poolName"
+
+    try {
+        Restart-WebAppPool -Name $poolName -ErrorAction Stop
+        Write-Success "App Pool recycled: $poolName"
+    } catch {
+        Write-Warn "Restart-WebAppPool gagal, fallback stop/start: $($_.Exception.Message)"
+        Stop-WebAppPool -Name $poolName -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+        Start-WebAppPool -Name $poolName -ErrorAction SilentlyContinue
+        Write-Success "App Pool restarted (fallback): $poolName"
+    }
+
+    Start-Website -Name $Project.siteName -ErrorAction SilentlyContinue
+    Write-Success "Site ensured running: $($Project.siteName)"
 }
 
 function Setup-SSL {
@@ -516,6 +644,15 @@ if (-not (Test-Path $ConfigPath)) {
 $config   = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 $projects = @($config.projects | Where-Object { $_.enabled -eq $true })
 
+if ($DryRun -and $Mode -ne "Update") {
+    Write-Fail "DryRun hanya didukung untuk Mode Update"
+    exit 1
+}
+
+if ($DryRun) {
+    Write-Warn "DRY-RUN aktif: tidak ada perubahan yang akan diterapkan ke IIS"
+}
+
 Write-Host "  Config  : $($config.serverName)" -ForegroundColor White
 Write-Host "  Projects: $($projects.Count) aktif" -ForegroundColor White
 
@@ -568,6 +705,23 @@ if ($Mode -eq "Setup") {
 
 Import-Module WebAdministration -ErrorAction Stop
 
+# Validasi key env wajib sebelum apply perubahan apapun
+Write-Header "Validasi Required Env Keys"
+$envValidationFailed = $false
+foreach ($project in $projects) {
+    $valid = Test-ProjectRequiredEnvKeys -Project $project
+    if (-not $valid) { $envValidationFailed = $true }
+}
+if ($envValidationFailed) {
+    Write-Host ""
+    Write-Fail "Proses dibatalkan: required env keys belum valid"
+    Write-Host "  Perbaiki requiredEnvKeys/envVars di server-config.json lalu jalankan ulang" -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+
+$recycledPools = @()
+
 foreach ($project in $projects) {
     Write-Header "Project: $($project.displayName)"
 
@@ -605,17 +759,32 @@ foreach ($project in $projects) {
         }
     }
 
-    # 7. Set environment variables (Setup & Update)
-    Set-EnvVars -Project $project
+    # 7. Sinkronisasi environment variables (Setup & Update)
+    $envChanged = Set-EnvVars -Project $project -DryRun:$DryRun
 
-    # 8. Start site & pool
-    Write-Step "Start site..."
-    try {
-        Start-WebAppPool -Name $project.appPoolName -ErrorAction SilentlyContinue
-        Start-Website    -Name $project.siteName    -ErrorAction SilentlyContinue
-        Write-Success "Site running: $($project.siteName)"
-    } catch {
-        Write-Warn "Belum bisa start - publish dulu file ke: $($project.physicalPath)"
+    # 8. Start/recycle bergantung mode
+    if ($Mode -eq "Setup") {
+        Write-Step "Start site..."
+        try {
+            Start-WebAppPool -Name $project.appPoolName -ErrorAction SilentlyContinue
+            Start-Website    -Name $project.siteName    -ErrorAction SilentlyContinue
+            Write-Success "Site running: $($project.siteName)"
+        } catch {
+            Write-Warn "Belum bisa start - publish dulu file ke: $($project.physicalPath)"
+        }
+    }
+    elseif ($Mode -eq "Update") {
+        if ($envChanged) {
+            if ($DryRun) {
+                Write-Warn "DRY-RUN recycle app pool: $($project.appPoolName)"
+                $recycledPools += $project.appPoolName
+            } else {
+                Recycle-ProjectAppPool -Project $project
+                $recycledPools += $project.appPoolName
+            }
+        } else {
+            Write-Step "Tidak ada perubahan env var, skip recycle: $($project.appPoolName)"
+        }
     }
 }
 
@@ -625,9 +794,30 @@ if ($Mode -eq "Setup") {
     Setup-SSL -SslConfig $config.ssl -Projects $projects
 }
 
-# ── Restart IIS ──────────────────────────────
-iisreset /restart | Out-Null
-Write-Success "IIS direstart"
+# ── Restart IIS / Recycle Pool ───────────────
+if ($Mode -eq "Setup") {
+    iisreset /restart | Out-Null
+    Write-Success "IIS direstart"
+}
+elseif ($Mode -eq "Update") {
+    if ($DryRun) {
+        if ($recycledPools.Count -gt 0) {
+            $uniquePools = $recycledPools | Sort-Object -Unique
+            Write-Success "Dry-run selesai: ada perubahan env vars"
+            Write-Host "  App Pool yang akan direcycle: $($uniquePools -join ', ')" -ForegroundColor Yellow
+        } else {
+            Write-Success "Dry-run selesai: tidak ada perubahan env vars"
+        }
+    } else {
+        if ($recycledPools.Count -gt 0) {
+            $uniquePools = $recycledPools | Sort-Object -Unique
+            Write-Success "Update selesai tanpa iisreset global"
+            Write-Host "  App Pool direcycle: $($uniquePools -join ', ')" -ForegroundColor Green
+        } else {
+            Write-Success "Update selesai: tidak ada perubahan env vars, tidak ada recycle"
+        }
+    }
+}
 
 # ── Summary ──────────────────────────────────
 Write-Host ""

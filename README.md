@@ -3,6 +3,13 @@
 Script otomatis untuk setup IIS di Windows Server untuk hosting beberapa project
 ASP.NET Core sekaligus. Edit config JSON, jalankan script, selesai.
 
+Fitur terbaru:
+
+- Mode `Update` tanpa `iisreset` global, hanya recycle app pool yang benar-benar berubah.
+- Sinkronisasi env vars penuh: key lama di IIS yang sudah tidak ada di config akan dihapus.
+- Validasi `requiredEnvKeys` per project sebelum apply untuk mencegah key kritikal terlewat.
+- Dry-run untuk preview diff env vars sebelum apply (tanpa perubahan ke IIS).
+
 ---
 
 ## File dalam Paket Ini
@@ -52,6 +59,9 @@ Sesuaikan untuk project baru kamu:
       "envVars": {
         "ConnectionStrings__MainConnection": "Server=...;Database=...;"
       },
+      "requiredEnvKeys": [
+        "ConnectionStrings__MainConnection"
+      ],
       "enabled": true
     }
   ]
@@ -113,10 +123,17 @@ dotnet publish ./src/MyProject.API `
 | Mode | Perintah | Fungsi |
 |------|----------|--------|
 | `Setup` (default) | `.\Setup-IIS.ps1` | Install IIS + validasi port + buat semua site baru |
-| `Update` | `.\Setup-IIS.ps1 -Mode Update` | Update env vars saja (tanpa buat ulang site) |
+| `Update` | `.\Setup-IIS.ps1 -Mode Update` | Sinkronisasi penuh env vars + recycle app pool yang berubah (tanpa `iisreset` global) |
+| `Update (Dry-Run)` | `.\Setup-IIS.ps1 -Mode Update -DryRun` | Tampilkan diff env vars (add/change/remove) tanpa apply dan tanpa recycle |
 | `Status` | `.\Setup-IIS.ps1 -Mode Status` | Tampilkan status semua site |
 | `Remove` | `.\Setup-IIS.ps1 -Mode Remove` | Hapus semua site (dengan konfirmasi) |
 | `Audit` | `.\Setup-IIS.ps1 -Mode Audit` | Tampilkan semua port yang dipakai + rekomendasi port aman |
+
+Contoh preview sebelum apply:
+
+```powershell
+.\Setup-IIS.ps1 -Mode Update -DryRun
+```
 
 ---
 
@@ -162,6 +179,17 @@ APIUrl (root level)              → APIUrl
 ```
 
 Nilai di `envVars` akan **override** nilai di `appsettings.Production.json` saat runtime.
+
+Tambahkan juga `requiredEnvKeys` per project untuk key kritikal yang wajib ada dan tidak boleh kosong:
+
+```json
+"requiredEnvKeys": [
+  "ConnectionStrings__MainConnection",
+  "ApplicationConfig__SecretKey"
+]
+```
+
+Jika ada key wajib yang hilang/kosong, script akan batal sebelum perubahan diaplikasikan.
 
 ---
 
