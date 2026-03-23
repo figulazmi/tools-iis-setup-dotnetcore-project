@@ -9,6 +9,7 @@ Fitur terbaru:
 - Sinkronisasi env vars penuh: key lama di IIS yang sudah tidak ada di config akan dihapus.
 - Validasi `requiredEnvKeys` per project sebelum apply untuk mencegah key kritikal terlewat.
 - Dry-run untuk preview diff env vars sebelum apply (tanpa perubahan ke IIS).
+- Mode `SyncBindings` untuk sinkronisasi binding IIS (port/host/protocol) dari config.
 
 ---
 
@@ -125,6 +126,8 @@ dotnet publish ./src/MyProject.API `
 | `Setup` (default) | `.\Setup-IIS.ps1` | Install IIS + validasi port + buat semua site baru |
 | `Update` | `.\Setup-IIS.ps1 -Mode Update` | Sinkronisasi penuh env vars + recycle app pool yang berubah (tanpa `iisreset` global) |
 | `Update (Dry-Run)` | `.\Setup-IIS.ps1 -Mode Update -DryRun` | Tampilkan diff env vars (add/change/remove) tanpa apply dan tanpa recycle |
+| `SyncBindings` | `.\Setup-IIS.ps1 -Mode SyncBindings` | Sinkronisasi binding IIS (port/host/protocol) sesuai `server-config.json` |
+| `SyncBindings (Dry-Run)` | `.\Setup-IIS.ps1 -Mode SyncBindings -DryRun` | Preview diff binding (add/remove) tanpa apply |
 | `Status` | `.\Setup-IIS.ps1 -Mode Status` | Tampilkan status semua site |
 | `Remove` | `.\Setup-IIS.ps1 -Mode Remove` | Hapus semua site (dengan konfirmasi) |
 | `Audit` | `.\Setup-IIS.ps1 -Mode Audit` | Tampilkan semua port yang dipakai + rekomendasi port aman |
@@ -133,6 +136,16 @@ Contoh preview sebelum apply:
 
 ```powershell
 .\Setup-IIS.ps1 -Mode Update -DryRun
+```
+
+Contoh sinkronisasi binding port setelah ubah config (mis. 600x -> 700x):
+
+```powershell
+# Preview dulu
+.\Setup-IIS.ps1 -Mode SyncBindings -DryRun
+
+# Apply jika sudah sesuai
+.\Setup-IIS.ps1 -Mode SyncBindings
 ```
 
 ---

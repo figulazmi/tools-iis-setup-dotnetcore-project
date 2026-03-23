@@ -9,26 +9,29 @@
 .PARAMETER Mode
     Setup  : Install IIS + buat semua site/app pool (default)
     Update : Update environment variables dari config (tanpa buat ulang site)
+    SyncBindings : Sinkronisasi binding IIS (port/host/protocol) dari config
     Remove : Hapus semua site/app pool yang ada di config
     Status : Tampilkan status semua site
     Audit  : Tampilkan semua port yang sudah dipakai di server ini
 
 .PARAMETER DryRun
-    Hanya untuk Mode Update. Menampilkan diff env vars (add/change/remove)
-    tanpa apply perubahan dan tanpa recycle app pool.
+    Untuk Mode Update/SyncBindings. Menampilkan diff perubahan
+    tanpa apply perubahan ke IIS.
 
 .EXAMPLE
     .\Setup-IIS.ps1
     .\Setup-IIS.ps1 -Mode Status
     .\Setup-IIS.ps1 -Mode Update
     .\Setup-IIS.ps1 -Mode Update -DryRun
+    .\Setup-IIS.ps1 -Mode SyncBindings
+    .\Setup-IIS.ps1 -Mode SyncBindings -DryRun
     .\Setup-IIS.ps1 -Mode Audit
     .\Setup-IIS.ps1 -ConfigPath "C:\configs\production.json" -Mode Setup
 #>
 
 param(
     [string]$ConfigPath = ".\server-config.json",
-    [ValidateSet("Setup", "Update", "Remove", "Status", "Audit")]
+    [ValidateSet("Setup", "Update", "SyncBindings", "Remove", "Status", "Audit")]
     [string]$Mode = "Setup",
     [switch]$DryRun
 )
@@ -508,6 +511,136 @@ function Set-EnvVars {
     return $changed
 }
 
+function ConvertTo-BindingKey {
+    param([string]$Protocol, [int]$Port, [string]$HostHeader)
+    return "{0}|{1}|{2}" -f $Protocol.ToLowerInvariant(), $Port, $HostHeader.ToLowerInvariant()
+}
+
+function Get-NormalizedHostHeader {
+    param([string]$HostHeader)
+
+    if ([string]::IsNullOrWhiteSpace($HostHeader)) { return "" }
+    return $HostHeader.Trim().ToLowerInvariant()
+}
+
+function Get-DesiredBindings {
+    param([object]$Project)
+
+    $list = @()
+    foreach ($b in @($Project.bindings)) {
+        $protocol = if ($b.protocol) { [string]$b.protocol } else { "http" }
+        $port = [int]$b.port
+        $hostHeaderNorm = Get-NormalizedHostHeader -HostHeader ([string]$b.hostname)
+        $key = ConvertTo-BindingKey -Protocol $protocol -Port $port -HostHeader $hostHeaderNorm
+
+        $list += [PSCustomObject]@{
+            key      = $key
+            protocol = $protocol.ToLowerInvariant()
+            port     = $port
+            hostname = $hostHeaderNorm
+        }
+    }
+    return @($list)
+}
+
+function Get-ExistingBindings {
+    param([string]$SiteName)
+
+    $list = @()
+    $bindings = Get-WebBinding -Name $SiteName -ErrorAction SilentlyContinue
+    foreach ($b in @($bindings)) {
+        $port = 0
+        $hostHeaderNorm = ""
+        if ($b.bindingInformation -match '^[^:]*:(\d+):(.*)$') {
+            $port = [int]$Matches[1]
+            $hostHeaderNorm = Get-NormalizedHostHeader -HostHeader ([string]$Matches[2])
+        }
+        $protocol = ([string]$b.protocol).ToLowerInvariant()
+        $key = ConvertTo-BindingKey -Protocol $protocol -Port $port -HostHeader $hostHeaderNorm
+
+        $list += [PSCustomObject]@{
+            key      = $key
+            protocol = $protocol
+            port     = $port
+            hostname = $hostHeaderNorm
+        }
+    }
+    return @($list)
+}
+
+function Sync-ProjectBindings {
+    param(
+        [object]$Project,
+        [switch]$DryRun
+    )
+
+    $siteName = $Project.siteName
+    $site = Get-Website -Name $siteName -ErrorAction SilentlyContinue
+    if (-not $site) {
+        Write-Warn "Site '$siteName' belum ada, skip sync binding"
+        return $false
+    }
+
+    Write-Step "Sinkronisasi binding untuk $siteName..."
+
+    $desired = Get-DesiredBindings -Project $Project
+    $existing = Get-ExistingBindings -SiteName $siteName
+
+    $desiredMap = @{}
+    foreach ($d in $desired) { $desiredMap[$d.key] = $d }
+
+    $existingMap = @{}
+    foreach ($e in $existing) { $existingMap[$e.key] = $e }
+
+    $toRemove = @($existing | Where-Object { -not $desiredMap.ContainsKey($_.key) })
+    $toAdd    = @($desired  | Where-Object { -not $existingMap.ContainsKey($_.key) })
+
+    $changed = $false
+
+    foreach ($r in $toRemove) {
+        if ($DryRun) {
+            Write-Warn "  DRY-RUN remove binding: $($r.protocol)://$($r.hostname):$($r.port)"
+            $changed = $true
+            continue
+        }
+
+        try {
+            Remove-WebBinding -Name $siteName -Protocol $r.protocol -Port $r.port -HostHeader $r.hostname -ErrorAction Stop
+            Write-Success "  Binding removed: $($r.protocol)://$($r.hostname):$($r.port)"
+            $changed = $true
+        } catch {
+            Write-Warn "  Gagal remove binding $($r.protocol)://$($r.hostname):$($r.port) : $($_.Exception.Message)"
+        }
+    }
+
+    foreach ($a in $toAdd) {
+        if ($DryRun) {
+            Write-Warn "  DRY-RUN add binding: $($a.protocol)://$($a.hostname):$($a.port)"
+            $changed = $true
+            continue
+        }
+
+        try {
+            New-WebBinding -Name $siteName -Protocol $a.protocol -Port $a.port -HostHeader $a.hostname | Out-Null
+            Write-Success "  Binding added: $($a.protocol)://$($a.hostname):$($a.port)"
+            $changed = $true
+        } catch {
+            Write-Warn "  Gagal add binding $($a.protocol)://$($a.hostname):$($a.port) : $($_.Exception.Message)"
+        }
+    }
+
+    if (-not $changed) {
+        Write-Step "  Binding sudah sinkron"
+    }
+
+    if ($changed -and -not $DryRun) {
+        Start-Website -Name $siteName -ErrorAction SilentlyContinue
+        Write-Success "Site ensured running: $siteName"
+    }
+
+    return $changed
+}
+
 function Recycle-ProjectAppPool {
     param([object]$Project)
 
@@ -644,8 +777,8 @@ if (-not (Test-Path $ConfigPath)) {
 $config   = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 $projects = @($config.projects | Where-Object { $_.enabled -eq $true })
 
-if ($DryRun -and $Mode -ne "Update") {
-    Write-Fail "DryRun hanya didukung untuk Mode Update"
+if ($DryRun -and $Mode -notin @("Update", "SyncBindings")) {
+    Write-Fail "DryRun hanya didukung untuk Mode Update atau SyncBindings"
     exit 1
 }
 
@@ -677,6 +810,30 @@ if ($Mode -eq "Remove") {
     exit 0
 }
 
+# ── Mode: SyncBindings ──────────────────────
+if ($Mode -eq "SyncBindings") {
+    Import-Module WebAdministration -ErrorAction SilentlyContinue
+
+    Write-Header "Validasi Port untuk SyncBindings"
+    $portConflict = $false
+    foreach ($project in $projects) {
+        foreach ($binding in $project.bindings) {
+            $available = Test-PortAvailable -Port $binding.port -ProjectName $project.displayName
+            if (-not $available) { $portConflict = $true }
+        }
+    }
+
+    if ($portConflict) {
+        Write-Host ""
+        Write-Fail "SyncBindings dibatalkan karena ada konflik port"
+        Write-Host "  Jalankan '.\Setup-IIS.ps1 -Mode Audit' untuk lihat port yang tersedia" -ForegroundColor Yellow
+        Write-Host ""
+        exit 1
+    }
+
+    Write-Success "Semua port valid untuk SyncBindings"
+}
+
 # ── Mode: Setup ──────────────────────────────
 if ($Mode -eq "Setup") {
     Ensure-IISInstalled
@@ -705,25 +862,34 @@ if ($Mode -eq "Setup") {
 
 Import-Module WebAdministration -ErrorAction Stop
 
-# Validasi key env wajib sebelum apply perubahan apapun
-Write-Header "Validasi Required Env Keys"
-$envValidationFailed = $false
-foreach ($project in $projects) {
-    $valid = Test-ProjectRequiredEnvKeys -Project $project
-    if (-not $valid) { $envValidationFailed = $true }
-}
-if ($envValidationFailed) {
-    Write-Host ""
-    Write-Fail "Proses dibatalkan: required env keys belum valid"
-    Write-Host "  Perbaiki requiredEnvKeys/envVars di server-config.json lalu jalankan ulang" -ForegroundColor Yellow
-    Write-Host ""
-    exit 1
+# Validasi key env wajib untuk mode yang menyentuh env var
+if ($Mode -in @("Setup", "Update")) {
+    Write-Header "Validasi Required Env Keys"
+    $envValidationFailed = $false
+    foreach ($project in $projects) {
+        $valid = Test-ProjectRequiredEnvKeys -Project $project
+        if (-not $valid) { $envValidationFailed = $true }
+    }
+    if ($envValidationFailed) {
+        Write-Host ""
+        Write-Fail "Proses dibatalkan: required env keys belum valid"
+        Write-Host "  Perbaiki requiredEnvKeys/envVars di server-config.json lalu jalankan ulang" -ForegroundColor Yellow
+        Write-Host ""
+        exit 1
+    }
 }
 
 $recycledPools = @()
+$changedSites = @()
 
 foreach ($project in $projects) {
     Write-Header "Project: $($project.displayName)"
+
+    if ($Mode -eq "SyncBindings") {
+        $bindingChanged = Sync-ProjectBindings -Project $project -DryRun:$DryRun
+        if ($bindingChanged) { $changedSites += $project.siteName }
+        continue
+    }
 
     # 1. Buat folder fisik + logs + Media
     Write-Step "Menyiapkan folder..."
@@ -818,6 +984,25 @@ elseif ($Mode -eq "Update") {
         }
     }
 }
+elseif ($Mode -eq "SyncBindings") {
+    if ($DryRun) {
+        if ($changedSites.Count -gt 0) {
+            $uniqueSites = $changedSites | Sort-Object -Unique
+            Write-Success "Dry-run SyncBindings selesai: ada perubahan"
+            Write-Host "  Site yang akan berubah binding: $($uniqueSites -join ', ')" -ForegroundColor Yellow
+        } else {
+            Write-Success "Dry-run SyncBindings selesai: binding sudah sinkron"
+        }
+    } else {
+        if ($changedSites.Count -gt 0) {
+            $uniqueSites = $changedSites | Sort-Object -Unique
+            Write-Success "SyncBindings selesai"
+            Write-Host "  Site yang binding-nya diupdate: $($uniqueSites -join ', ')" -ForegroundColor Green
+        } else {
+            Write-Success "SyncBindings selesai: tidak ada perubahan binding"
+        }
+    }
+}
 
 # ── Summary ──────────────────────────────────
 Write-Host ""
@@ -827,8 +1012,9 @@ Write-Host "  LANGKAH SELANJUTNYA:" -ForegroundColor Yellow
 Write-Host "  1. Publish project dari laptop: dotnet publish -c Release -o <physicalPath>" -ForegroundColor White
 Write-Host "  2. Transfer hasil publish ke folder masing-masing project" -ForegroundColor White
 Write-Host "  3. Jika ada perubahan envVars: .\Setup-IIS.ps1 -Mode Update" -ForegroundColor White
-Write-Host "  4. Untuk cek port server: .\Setup-IIS.ps1 -Mode Audit" -ForegroundColor White
+Write-Host "  4. Jika ada perubahan binding/port: .\Setup-IIS.ps1 -Mode SyncBindings" -ForegroundColor White
+Write-Host "  5. Untuk cek port server: .\Setup-IIS.ps1 -Mode Audit" -ForegroundColor White
 if ($config.ssl.mode -eq "none") {
-    Write-Host "  5. Setup SSL: edit server-config.json ssl.mode = 'winacme' atau 'pfx'" -ForegroundColor White
+    Write-Host "  6. Setup SSL: edit server-config.json ssl.mode = 'winacme' atau 'pfx'" -ForegroundColor White
 }
 Write-Host ""
