@@ -7,12 +7,13 @@
     Path ke file server-config.json. Default: .\server-config.json
 
 .PARAMETER Mode
-    Setup  : Install IIS + buat semua site/app pool (default)
+    Setup  : Install IIS + buat semua site/app pool
     Update : Update environment variables dari config (tanpa buat ulang site)
     SyncBindings : Sinkronisasi binding IIS (port/host/protocol) dari config
     Remove : Hapus semua site/app pool yang ada di config
     Status : Tampilkan status semua site
     Audit  : Tampilkan semua port yang sudah dipakai di server ini
+    Jika tidak diisi, script akan menampilkan menu angka 1-10.
 
 .PARAMETER DryRun
     Untuk Mode Update/SyncBindings. Menampilkan diff perubahan
@@ -69,6 +70,42 @@ function Write-Step    { param([string]$t) Write-Host "  > $t" -ForegroundColor 
 function Write-Success { param([string]$t) Write-Host "  OK $t" -ForegroundColor Green }
 function Write-Warn    { param([string]$t) Write-Host "  !! $t" -ForegroundColor Magenta }
 function Write-Fail    { param([string]$t) Write-Host "  XX $t" -ForegroundColor Red }
+
+function Show-InteractiveMenu {
+    Write-Header "Menu Mode (Pilih Angka)"
+    Write-Host "  No | Mode                      | Fungsi" -ForegroundColor White
+    Write-Host "  ---------------------------------------------------------------" -ForegroundColor Gray
+    Write-Host "   1 | Setup                     | Install IIS + setup site/app pool" -ForegroundColor White
+    Write-Host "   2 | Update                    | Sinkronisasi env vars + recycle app pool berubah" -ForegroundColor White
+    Write-Host "   3 | Update (Dry-Run)          | Preview diff env vars tanpa apply" -ForegroundColor White
+    Write-Host "   4 | SyncBindings              | Sinkronisasi binding IIS sesuai config" -ForegroundColor White
+    Write-Host "   5 | SyncBindings (Dry-Run)    | Preview diff binding tanpa apply" -ForegroundColor White
+    Write-Host "   6 | Status                    | Tampilkan status site/app pool" -ForegroundColor White
+    Write-Host "   7 | Remove                    | Hapus site/app pool dari config (dengan konfirmasi)" -ForegroundColor White
+    Write-Host "   8 | Audit                     | Audit port server + rekomendasi" -ForegroundColor White
+    Write-Host "   9 | Audit Export Markdown     | Audit + export markdown" -ForegroundColor White
+    Write-Host "  10 | Audit Export CSV          | Audit + export CSV" -ForegroundColor White
+    Write-Host ""
+
+    while ($true) {
+        $choice = Read-Host "  Pilih angka (1-10)"
+        switch ($choice) {
+            "1"  { return [PSCustomObject]@{ Mode="Setup";        DryRun=$false; AuditExport="none" } }
+            "2"  { return [PSCustomObject]@{ Mode="Update";       DryRun=$false; AuditExport="none" } }
+            "3"  { return [PSCustomObject]@{ Mode="Update";       DryRun=$true;  AuditExport="none" } }
+            "4"  { return [PSCustomObject]@{ Mode="SyncBindings"; DryRun=$false; AuditExport="none" } }
+            "5"  { return [PSCustomObject]@{ Mode="SyncBindings"; DryRun=$true;  AuditExport="none" } }
+            "6"  { return [PSCustomObject]@{ Mode="Status";       DryRun=$false; AuditExport="none" } }
+            "7"  { return [PSCustomObject]@{ Mode="Remove";       DryRun=$false; AuditExport="none" } }
+            "8"  { return [PSCustomObject]@{ Mode="Audit";        DryRun=$false; AuditExport="none" } }
+            "9"  { return [PSCustomObject]@{ Mode="Audit";        DryRun=$false; AuditExport="markdown" } }
+            "10" { return [PSCustomObject]@{ Mode="Audit";        DryRun=$false; AuditExport="csv" } }
+            default {
+                Write-Fail "Pilihan tidak valid. Masukkan angka 1-10."
+            }
+        }
+    }
+}
 
 # ─────────────────────────────────────────────
 #  PORT VALIDATION FUNCTIONS
@@ -907,6 +944,13 @@ function Remove-AllSites {
 # ─────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────
+
+if (-not $PSBoundParameters.ContainsKey("Mode")) {
+    $menuSelection = Show-InteractiveMenu
+    $Mode = [string]$menuSelection.Mode
+    $DryRun = [bool]$menuSelection.DryRun
+    $AuditExport = [string]$menuSelection.AuditExport
+}
 
 Clear-Host
 Write-Host ""

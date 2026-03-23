@@ -84,6 +84,24 @@ cd C:\scripts\iis-setup
 .\Setup-IIS.ps1
 ```
 
+Sekarang script akan menampilkan menu angka `1-10` langsung di terminal.
+User cukup pilih angka sesuai kebutuhan, jadi tidak perlu mengetik parameter mode manual.
+
+Pilihan menu interaktif:
+
+| No | Mode | Fungsi |
+|----|------|--------|
+| `1` | `Setup` | Install IIS + setup site/app pool |
+| `2` | `Update` | Sinkronisasi env vars + recycle app pool yang berubah |
+| `3` | `Update (Dry-Run)` | Preview diff env vars tanpa apply |
+| `4` | `SyncBindings` | Sinkronisasi binding IIS sesuai config |
+| `5` | `SyncBindings (Dry-Run)` | Preview diff binding tanpa apply |
+| `6` | `Status` | Tampilkan status site/app pool |
+| `7` | `Remove` | Hapus site/app pool dari config (dengan konfirmasi) |
+| `8` | `Audit` | Audit port server + rekomendasi |
+| `9` | `Audit Export Markdown` | Audit + export markdown |
+| `10` | `Audit Export CSV` | Audit + export CSV |
+
 Script otomatis akan:
 - Install IIS dan fitur yang diperlukan
 - Cek ASP.NET Core Hosting Bundle
@@ -120,7 +138,7 @@ dotnet publish ./src/MyProject.API `
 
 ---
 
-## Mode-mode Script
+## Mode-mode Script (Opsional Manual/CI)
 
 | Mode | Perintah | Fungsi |
 |------|----------|--------|
@@ -135,6 +153,8 @@ dotnet publish ./src/MyProject.API `
 | `Audit (Export Markdown)` | `.\Setup-IIS.ps1 -Mode Audit -AuditExport markdown` | Export laporan audit ke markdown |
 | `Audit (Export CSV)` | `.\Setup-IIS.ps1 -Mode Audit -AuditExport csv` | Export laporan audit ke CSV |
 | `Audit (Export Both)` | `.\Setup-IIS.ps1 -Mode Audit -AuditExport both` | Export markdown + CSV sekaligus |
+
+> Untuk user umum, disarankan pakai menu interaktif (cukup jalankan `.\Setup-IIS.ps1` lalu pilih angka).
 
 Contoh preview sebelum apply:
 
