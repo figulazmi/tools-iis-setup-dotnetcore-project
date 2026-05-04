@@ -94,6 +94,15 @@ foreach ($project in $projects) {
 
     Write-Success "Publish selesai ke $outputPath"
 
+    # Sync env vars dari server-config.json ke App Pool (applicationHost.config)
+    Write-Step "Sync env vars post-publish..."
+    $setupScript = Join-Path $PSScriptRoot "Setup-IIS.ps1"
+    if (Test-Path $setupScript) {
+        & $setupScript -Mode Update -ConfigPath $ConfigPath
+    } else {
+        Write-Warn "Setup-IIS.ps1 tidak ditemukan, skip env vars sync"
+    }
+
     # Pastikan folder Media ada setelah publish
     $mediaPath = Join-Path $outputPath "Media"
     if (-not (Test-Path $mediaPath)) {

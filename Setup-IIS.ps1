@@ -548,9 +548,6 @@ function Set-WebConfig {
         '                  stdoutLogEnabled="true"',
         '                  stdoutLogFile=".\logs\stdout"',
         "                  hostingModel=`"$hostingModel`">",
-        '        <environmentVariables>',
-        "          <environmentVariable name=`"ASPNETCORE_ENVIRONMENT`" value=`"$($Project.environment)`" />",
-        '        </environmentVariables>',
         '      </aspNetCore>',
         '    </system.webServer>',
         '  </location>',
@@ -606,8 +603,8 @@ function Set-EnvVars {
         [object]$Project,
         [switch]$DryRun
     )
-    $siteName = $Project.siteName
-    $envVars  = $Project.envVars
+    $appPoolName = $Project.appPoolName
+    $envVars     = $Project.envVars
 
     if (-not $envVars) {
         Write-Warn "Tidak ada envVars di config untuk $($Project.name)"
@@ -620,10 +617,13 @@ function Set-EnvVars {
         Write-Step "Sinkronisasi environment variables untuk $($Project.name)..."
     }
 
-    $pspath = "MACHINE/WEBROOT/APPHOST/$siteName"
-    $filter = "system.webServer/aspNetCore/environmentVariables"
+    # Env vars disimpan di applicationHost.config via App Pool — tidak terpengaruh dotnet publish
+    $pspath = "MACHINE/WEBROOT/APPHOST"
+    $filter = "system.applicationHost/applicationPools/add[@name='$appPoolName']/environmentVariables"
 
     $desiredMap = @{}
+    # ASPNETCORE_ENVIRONMENT dikelola di sini (tidak lagi di web.config)
+    $desiredMap["ASPNETCORE_ENVIRONMENT"] = [string]$Project.environment
     foreach ($prop in $envVars.PSObject.Properties) {
         $desiredMap[$prop.Name] = [string]$prop.Value
     }
