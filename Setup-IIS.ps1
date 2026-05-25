@@ -535,6 +535,35 @@ function Set-WebConfig {
 
     Write-Step "DLL target: $dllName"
 
+    # Build environmentVariables section for in-process hosting
+    $envVarsLines = @()
+    if ($hostingModel -eq "inprocess" -and $Project.envVars) {
+        $envVarsLines += '        <environmentVariables>'
+
+        # Add ASPNETCORE_ENVIRONMENT first (idempotent - only once)
+        $envVarsLines += "          <environmentVariable name=`"ASPNETCORE_ENVIRONMENT`" value=`"$($Project.environment)`" />"
+
+        # Add all other env vars from config (skip ASPNETCORE_ENVIRONMENT to avoid duplicate)
+        foreach ($prop in $Project.envVars.PSObject.Properties) {
+            $name = $prop.Name
+
+            # Skip ASPNETCORE_ENVIRONMENT (already added above)
+            if ($name -eq "ASPNETCORE_ENVIRONMENT") {
+                continue
+            }
+
+            $value = [string]$prop.Value
+            # Escape XML special characters
+            $valueEscaped = $value -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;'
+
+            # Use string format to avoid backtick escaping issues with double underscore
+            $envVarLine = '          <environmentVariable name="{0}" value="{1}" />' -f $name, $valueEscaped
+            $envVarsLines += $envVarLine
+        }
+
+        $envVarsLines += '        </environmentVariables>'
+    }
+
     $lines = @(
         '<?xml version="1.0" encoding="utf-8"?>',
         '<configuration>',
@@ -547,7 +576,15 @@ function Set-WebConfig {
         "                  arguments=`".\$dllName`"",
         '                  stdoutLogEnabled="true"',
         '                  stdoutLogFile=".\logs\stdout"',
-        "                  hostingModel=`"$hostingModel`">",
+        "                  hostingModel=`"$hostingModel`">"
+    )
+
+    # Add environmentVariables section if in-process
+    if ($envVarsLines.Count -gt 0) {
+        $lines += $envVarsLines
+    }
+
+    $lines += @(
         '      </aspNetCore>',
         '    </system.webServer>',
         '  </location>',
@@ -556,7 +593,13 @@ function Set-WebConfig {
 
     $webConfigContent = $lines -join "`r`n"
     Set-Content -Path $webConfigPath -Value $webConfigContent -Encoding UTF8 -NoNewline
-    Write-Success "web.config dibuat (dll: $dllName, hostingModel: $hostingModel)"
+
+    if ($hostingModel -eq "inprocess" -and $Project.envVars) {
+        $envCount = $Project.envVars.PSObject.Properties.Count + 1
+        Write-Success "web.config dibuat (dll: $dllName, hostingModel: $hostingModel, envVars: $envCount)"
+    } else {
+        Write-Success "web.config dibuat (dll: $dllName, hostingModel: $hostingModel)"
+    }
 }
 
 function Test-ProjectRequiredEnvKeys {
@@ -1132,6 +1175,16 @@ foreach ($project in $projects) {
 
     # 7. Sinkronisasi environment variables (Setup & Update)
     $envChanged = Set-EnvVars -Project $project -DryRun:$DryRun
+
+    # 7b. Update web.config untuk in-process hosting (Mode Update)
+    if ($Mode -eq "Update" -and $project.hostingModel -eq "inprocess") {
+        if (-not $DryRun) {
+            Write-Step "Regenerate web.config untuk in-process hosting..."
+            Set-WebConfig -Project $project
+        } else {
+            Write-Warn "DRY-RUN regenerate web.config untuk in-process hosting"
+        }
+    }
 
     # 8. Start/recycle bergantung mode
     if ($Mode -eq "Setup") {
